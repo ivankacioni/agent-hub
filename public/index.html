@@ -1465,7 +1465,7 @@ function renderSync() {
       <div class="hint">Главный компьютер отдаёт другим устройствам только зашифрованное хранилище, и только по доступу с личным паролем. Любой другой запрос получает отказ и попадает в журнал ниже. Если Windows спросит про брандмауэр — разрешите доступ для частных сетей. Чтобы подключаться не из дома, установите Tailscale на оба устройства.</div>
       <div class="toggle-row" style="margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:10px 12px">${ic('cloud')}
         <div class="tt">Доступ через интернет<small>${!y.internet ? 'Включите, чтобы подключать устройства из другой сети — без настройки роутера. Работает через туннель Cloudflare; видны только зашифрованные данные.'
-          : y.tunnel?.status === 'on' ? '<span style="color:var(--ok)">Работает.</span> Нажмите «Код» у доступа и отправьте код на то устройство.'
+          : y.tunnel?.status === 'on' ? `<span style="color:var(--ok)">Работает</span> (${esc(y.tunnel.provider || '')}). Нажмите «Код» у доступа и отправьте код на то устройство.`
           : y.tunnel?.status === 'downloading' ? `Скачиваю программу туннеля (один раз)… ${y.tunnel.progress || 0}%`
           : y.tunnel?.status === 'error' ? `<span style="color:#f87171">${esc(y.tunnel.error || 'Ошибка')}</span>`
           : 'Подключаюсь…'}</small></div>

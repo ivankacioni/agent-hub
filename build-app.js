@@ -33,6 +33,8 @@ const { execFileSync } = require('child_process');
   const dest = path.join(process.env.LOCALAPPDATA, 'Programs', 'AgentHub');
   console.log('Устанавливаю в', dest);
   try { execFileSync('taskkill', ['/IM', 'AgentHub.exe', '/F'], { stdio: 'ignore' }); } catch {}
+  try { execFileSync('taskkill', ['/IM', 'cloudflared.exe', '/F'], { stdio: 'ignore' }); } catch {}
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500); // дать закрывающимся процессам отпустить файлы
   await new Promise((r) => setTimeout(r, 1000));
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(out, dest, { recursive: true });

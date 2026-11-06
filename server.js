@@ -1808,34 +1808,77 @@ async function ensureCloudflared() {
   if (got < 5e6 || head.toString() !== 'MZ') { fs.rmSync(tmp, { force: true }); throw new Error('скачан не тот файл'); }
   fs.renameSync(tmp, CF_BIN);
 }
-let tunnelRestarts = 0;
+// Провайдеры туннеля по очереди: Cloudflare, затем localhost.run через встроенный в Windows SSH
+// (у части провайдеров Cloudflare-туннели режут DPI, а SSH проходит).
+const SSH_BIN = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe') : 'ssh';
+const TUNNEL_URL_RE = /^https:\/\/[a-z0-9-]+\.(trycloudflare\.com|lhr\.life)$/;
+const TUNNEL_PROVIDERS = [
+  { id: 'cloudflare', label: 'Cloudflare', prepare: ensureCloudflared,
+    args: () => [CF_BIN, ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://127.0.0.1:${sync.port}`]],
+    url: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/,
+    blocked: (log) => /hard_fail=true/.test(log) || (log.match(/TLS handshake with edge error/g) || []).length >= 2 },
+  { id: 'lhr', label: 'localhost.run', prepare: async () => { if (!fs.existsSync(SSH_BIN)) throw new Error('нет встроенного SSH'); },
+    args: () => [SSH_BIN, ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${path.join(DATA, 'known_hosts')}`,
+      '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-o', 'ExitOnForwardFailure=yes', '-R', `80:127.0.0.1:${sync.port}`, 'nokey@localhost.run']],
+    url: /https:\/\/[a-z0-9-]+\.lhr\.life/,
+    blocked: (log) => /Permission denied|Connection (refused|timed out|reset)|Could not resolve/i.test(log) },
+];
+let tunnelRestarts = 0, providerIdx = 0;
 async function startTunnel() {
   if (sync.mode !== 'server' || !sync.internet || tunnel.child) return;
-  try { await ensureCloudflared(); }
-  catch (e) { tunnel.status = 'error'; tunnel.error = 'Не удалось скачать cloudflared: ' + e.message; pushState(); return; }
+  const prov = TUNNEL_PROVIDERS[providerIdx % TUNNEL_PROVIDERS.length];
+  try { await prov.prepare(); }
+  catch (e) { tunnel.error = `${prov.label}: ${e.message}`; pushState(); return nextProvider(); }
   if (sync.mode !== 'server' || !sync.internet || tunnel.child) return;
-  tunnel.status = 'starting'; tunnel.error = null; pushState();
-  const c = spawn(CF_BIN, ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${sync.port}`], { ...HIDE });
+  tunnel.status = 'starting'; tunnel.provider = prov.label; pushState();
+  const [bin, args] = prov.args();
+  const c = spawn(bin, args, { ...HIDE, cwd: DATA });
   tunnel.child = c;
-  let log = '';
+  let log = '', switched = false;
+  const logFile = path.join(DATA, 'tunnel.log');
+  try { fs.writeFileSync(logFile, `== ${prov.label} ==\n`); } catch {}
   const onData = (d) => {
-    const s = String(d); log = (log + s).slice(-4000);
-    const m = s.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (m && m[0] !== tunnel.url) { tunnel.url = m[0]; tunnel.status = 'on'; tunnel.error = null; tunnelRestarts = 0; publishRelay(); pushState(); }
+    const s = String(d); log = (log + s).slice(-6000);
+    try { fs.appendFileSync(logFile, s); } catch {}
+    const m = s.match(prov.url);
+    if (m && m[0] !== tunnel.url) { tunnel.url = m[0]; tunnel.status = 'starting'; pushState(); verifyTunnel(c, m[0]); }
+    // провайдер заблокирован в этой сети — сразу пробуем следующий
+    if (!switched && tunnel.status !== 'on' && prov.blocked(log)) { switched = true; tunnel.error = `${prov.label} заблокирован в этой сети — пробую другой способ`; pushState(); c.switchProvider = true; try { killTree(c); } catch {} }
   };
   c.stdout.on('data', onData); c.stderr.on('data', onData);
   c.on('error', (e) => { tunnel.error = e.message; });
   c.on('close', () => {
     if (tunnel.child !== c) return;
+    const wasOn = tunnel.status === 'on';
     tunnel.child = null; tunnel.url = null;
-    if (sync.internet && sync.mode === 'server') {
-      tunnelRestarts++;
-      tunnel.status = 'starting';
-      if (tunnelRestarts > 3) { tunnel.status = 'error'; tunnel.error = 'Туннель не запускается. ' + (stripAnsi(log).match(/(ERR|error)[^\n]*/i)?.[0] || 'Проверьте интернет.'); }
-      setTimeout(startTunnel, Math.min(60000, 5000 * tunnelRestarts));
-    } else tunnel.status = 'off';
-    pushState();
+    if (!(sync.internet && sync.mode === 'server')) { tunnel.status = 'off'; pushState(); return; }
+    tunnel.status = 'starting';
+    if (c.switchProvider || !wasOn) { tunnelRestarts++; return nextProvider(); }
+    // работал и оборвался — переподключиться тем же способом (адрес сменится и опубликуется заново)
+    pushState(); setTimeout(startTunnel, 3000);
   });
+}
+function nextProvider() {
+  providerIdx++;
+  if (tunnelRestarts >= TUNNEL_PROVIDERS.length * 2) { tunnel.status = 'error'; tunnel.error = 'Ни один способ туннеля не работает в этой сети. Используйте Tailscale или подключайтесь в одной сети.'; }
+  pushState();
+  setTimeout(startTunnel, tunnelRestarts >= TUNNEL_PROVIDERS.length * 2 ? 60000 : 2000);
+}
+// «Работает» — только когда главный реально отвечает сам себе через интернет; тогда и публикуем адрес
+async function verifyTunnel(c, url) {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, i < 5 ? 2000 : 4000));
+    if (tunnel.child !== c || tunnel.url !== url) return;
+    try {
+      const r = await fetch(url + '/v1/hello?account=self-check', { signal: AbortSignal.timeout(10000) });
+      const j = r.ok ? await r.json().catch(() => null) : null;
+      if (j?.app === 'agent-hub') { tunnel.status = 'on'; tunnel.error = null; tunnelRestarts = 0; sync.tunnelProvider = providerIdx % TUNNEL_PROVIDERS.length; saveSync(); publishRelay(); pushState(); return; }
+    } catch {}
+  }
+  if (tunnel.child !== c) return;
+  tunnel.error = `${tunnel.provider} не отвечает — пробую другой способ`; pushState();
+  c.switchProvider = true;
+  try { killTree(c); } catch {}
 }
 function stopTunnel() { const c = tunnel.child; tunnel.child = null; tunnel.url = null; tunnel.status = 'off'; tunnel.error = null; if (c) { try { killTree(c); } catch {} } }
 const relayKey = () => unprotectBuf(sync.relay?.key);
@@ -1855,7 +1898,7 @@ async function resolveRelay(topic, keyB64) {
   catch { throw new Error('Нет связи с ntfy.sh — проверьте интернет'); }
   let best = null;
   for (const line of t.split('\n')) {
-    try { const ev = JSON.parse(line); if (ev.event !== 'message') continue; const m = unseal(Buffer.from(keyB64, 'base64'), JSON.parse(ev.message)); if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(m.url) && (!best || m.at > best.at)) best = m; } catch {}
+    try { const ev = JSON.parse(line); if (ev.event !== 'message') continue; const m = unseal(Buffer.from(keyB64, 'base64'), JSON.parse(ev.message)); if (TUNNEL_URL_RE.test(m.url) && (!best || m.at > best.at)) best = m; } catch {}
   }
   if (!best) throw new Error('Главный компьютер сейчас не в сети: включите его и откройте Agent Hub');
   return best.url;
@@ -1865,7 +1908,7 @@ function setInternet(on) {
   sync.internet = !!on;
   if (on && !sync.relay) sync.relay = { topic: 'agenthub-' + crypto.randomBytes(16).toString('hex'), key: protectBuf(crypto.randomBytes(32)) };
   saveSync();
-  if (on) { tunnelRestarts = 0; startTunnel(); } else stopTunnel();
+  if (on) { tunnelRestarts = 0; providerIdx = sync.tunnelProvider || 0; startTunnel(); } else stopTunnel();
   pushState();
 }
 // код подключения: где искать адрес главного + имя доступа. Пароль в код не входит.
@@ -1918,7 +1961,7 @@ function makeInstaller() {
 }
 const syncPublic = () => ({
   connected: syncConnected(), mode: sync.mode, folder: sync.folder, server: sync.server, port: sync.port,
-  serverRunning: !!hubServer, internet: !!sync.internet, tunnel: { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress }, viaCode: sync.mode === 'client' && !!sync.relay, addresses: sync.mode === 'server' ? hubAddresses() : [],
+  serverRunning: !!hubServer, internet: !!sync.internet, tunnel: { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: tunnel.provider }, viaCode: sync.mode === 'client' && !!sync.relay, addresses: sync.mode === 'server' ? hubAddresses() : [],
   deviceId: sync.deviceId, deviceName: sync.deviceName, lastSync: sync.lastSync, lastError: sync.lastError, removed: sync.removed,
   accounts: sync.mode === 'server' ? (sync.accounts || []).map((a) => ({ id: a.id, name: a.name, createdAt: a.createdAt, lastUsed: a.lastUsed, deviceId: a.deviceId, revoked: a.revoked })) : [],
   account: sync.mode === 'client' ? sync.account : null,
@@ -2258,7 +2301,7 @@ if (!EMBEDDED) server.on('error', (e) => {
 function afterStart() {
   try { syncAllSkills(); } catch (e) { console.error('skills', e.message); }
   upgradeKeyProtection();
-  if (sync.mode === 'server' && sync.internet) setTimeout(startTunnel, 1500);
+  if (sync.mode === 'server' && sync.internet) { providerIdx = sync.tunnelProvider || 0; setTimeout(startTunnel, 1500); }
   if (sync.mode === 'server' && getKey()) startHubServer().catch((e) => console.error('hub', e.message));
   (syncConnected() ? syncNow() : Promise.resolve()).catch(() => {}).finally(() => Promise.all(state.agents.map(refreshAuth)).then(refreshAllModels));
 }
