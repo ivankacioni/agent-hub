@@ -1883,16 +1883,34 @@ async function verifyTunnel(c, url) {
 }
 function stopTunnel() { const c = tunnel.child; tunnel.child = null; tunnel.url = null; tunnel.status = 'off'; tunnel.error = null; if (c) { try { killTree(c); } catch {} } }
 const relayKey = () => unprotectBuf(sync.relay?.key);
+let relayRetry = null;
+const tunnelLog = (s) => { try { fs.appendFileSync(path.join(DATA, 'tunnel.log'), `\n[agent-hub ${new Date().toLocaleTimeString('ru-RU')}] ${s}\n`); } catch {} };
 async function publishRelay() {
-  if (!tunnel.url || !sync.relay) return;
-  const body = JSON.stringify(seal(relayKey(), { url: tunnel.url, at: Date.now() }));
+  clearTimeout(relayRetry);
+  if (!tunnel.url || tunnel.status !== 'on') return;
+  const url = tunnel.url;
   try {
+    // ключ канала мог не расшифроваться (например, после переустановки) — тогда создаём канал заново; старые коды перестанут работать
+    let key = sync.relay ? relayKey() : null;
+    if (!sync.relay || !key) {
+      tunnelLog('ключ канала адреса недоступен — создаю новый канал');
+      key = crypto.randomBytes(32);
+      sync.relay = { topic: 'agenthub-' + crypto.randomBytes(16).toString('hex'), key: protectBuf(key) };
+      tunnel.relayReset = true;
+    }
+    const body = JSON.stringify(seal(key, { url, at: Date.now() }));
     const r = await fetch(`${RELAY}/${sync.relay.topic}`, { method: 'POST', body, signal: AbortSignal.timeout(15000) });
-    if (!r.ok) throw new Error('ntfy ' + r.status);
-    sync.relay.publishedAt = Date.now(); saveSync();
-  } catch (e) { console.error('relay', e.message); tunnel.error = 'Адрес не опубликован (ntfy.sh недоступен) — повторю позже'; pushState(); }
+    if (!r.ok) throw new Error('ntfy ответил ' + r.status);
+    sync.relay.publishedAt = Date.now(); tunnel.publishedAt = sync.relay.publishedAt; saveSync();
+    tunnelLog('адрес опубликован: ' + url);
+    if (tunnel.error) { tunnel.error = null; pushState(); } else pushState();
+  } catch (e) {
+    tunnelLog('адрес не опубликован: ' + e.message);
+    tunnel.error = 'Адрес не опубликован (' + e.message + ') — повторю через минуту'; pushState();
+    relayRetry = setTimeout(publishRelay, 60000);
+  }
 }
-setInterval(() => { if (tunnel.url) publishRelay(); }, 3 * 3600e3).unref(); // ntfy хранит сообщения 12 часов
+setInterval(() => { if (tunnel.url && tunnel.status === 'on') publishRelay(); }, 3 * 3600e3).unref(); // ntfy хранит сообщения 12 часов
 async function resolveRelay(topic, keyB64) {
   let t;
   try { t = await (await fetch(`${RELAY}/${encodeURIComponent(topic)}/json?poll=1&since=24h`, { signal: AbortSignal.timeout(15000) })).text(); }
@@ -1962,7 +1980,7 @@ function makeInstaller() {
 }
 const syncPublic = () => ({
   connected: syncConnected(), mode: sync.mode, folder: sync.folder, server: sync.server, port: sync.port,
-  serverRunning: !!hubServer, internet: !!sync.internet, tunnel: { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: tunnel.provider }, viaCode: sync.mode === 'client' && !!sync.relay, addresses: sync.mode === 'server' ? hubAddresses() : [],
+  serverRunning: !!hubServer, internet: !!sync.internet, tunnel: { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: tunnel.provider, publishedAt: tunnel.publishedAt || null, relayReset: !!tunnel.relayReset }, viaCode: sync.mode === 'client' && !!sync.relay, addresses: sync.mode === 'server' ? hubAddresses() : [],
   deviceId: sync.deviceId, deviceName: sync.deviceName, lastSync: sync.lastSync, lastError: sync.lastError, removed: sync.removed,
   accounts: sync.mode === 'server' ? (sync.accounts || []).map((a) => ({ id: a.id, name: a.name, createdAt: a.createdAt, lastUsed: a.lastUsed, deviceId: a.deviceId, revoked: a.revoked })) : [],
   account: sync.mode === 'client' ? sync.account : null,
