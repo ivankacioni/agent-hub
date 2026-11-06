@@ -1339,9 +1339,18 @@ function clientT(base, creds = clientCreds()) {
     const body = obj === undefined ? '' : JSON.stringify(obj);
     const time = String(Date.now()), nonce = crypto.randomBytes(12).toString('hex');
     let r;
-    try {
-      r = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Hub-Device': sync.deviceId, 'X-Hub-Account': encodeURIComponent(creds.account), 'X-Hub-Time': time, 'X-Hub-Nonce': nonce, 'X-Hub-Sig': hubSig(creds.auth, method, p, time, nonce, sync.deviceId, creds.account, body) }, body: body || undefined, signal: AbortSignal.timeout(30000) });
-    } catch (e) { throw new Error('Главный компьютер недоступен (' + base + '). Он должен быть включён, Agent Hub открыт.'); }
+    const send = () => fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Hub-Device': sync.deviceId, 'X-Hub-Account': encodeURIComponent(creds.account), 'X-Hub-Time': time, 'X-Hub-Nonce': nonce, 'X-Hub-Sig': hubSig(creds.auth, method, p, time, nonce, sync.deviceId, creds.account, body) }, body: body || undefined, signal: AbortSignal.timeout(30000) });
+    try { r = await send(); }
+    catch (e) {
+      // подключение по коду: адрес туннеля мог смениться — узнать новый и повторить
+      const relay = creds.relay || (sync.relay && sync.mode === 'client' ? { t: sync.relay.topic, k: unprotect(sync.relay.key) } : null);
+      if (!relay) throw new Error('Главный компьютер недоступен (' + base + '). Он должен быть включён, Agent Hub открыт.');
+      const nu = await resolveRelay(relay.t, relay.k);
+      if (nu === base) throw new Error('Главный компьютер недоступен. Он должен быть включён, Agent Hub открыт.');
+      base = nu; if (sync.mode === 'client' && !creds.relay) { sync.server = nu; saveSync(); }
+      try { r = await send(); } catch { throw new Error('Главный компьютер недоступен. Он должен быть включён, Agent Hub открыт.'); }
+    }
+    if (r.status === 502 || r.status === 530) throw new Error('Главный компьютер сейчас не в сети: включите его и откройте Agent Hub');
     const t = await r.text(); let j = null; try { j = t ? JSON.parse(t) : null; } catch {}
     if (r.status === 401) throw new Error('Главный компьютер не принял имя доступа или пароль');
     if (r.status === 403) throw new Error(j?.error || 'Главный компьютер отказал в доступе');
@@ -1541,7 +1550,10 @@ async function connectSync({ mode, folder, server, password, deviceName, port, a
     if (!sync.serverSecret) sync.serverSecret = protectBuf(crypto.randomBytes(32));
     sync.accounts = sync.accounts || [];
   } else {
-    server = normServerUrl(server);
+    // адрес или код подключения (AH1-…): по коду адрес туннеля находится сам
+    const code = parseCode(server);
+    if (code) { server = await resolveRelay(code.t, code.k); account = account || code.a; extra.relay = { topic: code.t, key: protect(code.k) }; }
+    else server = normServerUrl(server);
     account = String(account || '').trim();
     if (!account) throw new Error('Введите имя доступа — его создают на главном компьютере');
     let hello;
@@ -1555,9 +1567,9 @@ async function connectSync({ mode, folder, server, password, deviceName, port, a
     try { key = await T.fetchKey(); }
     catch (e) { throw new Error(/не принял/.test(e.message) ? 'Неверное имя доступа или пароль' : e.message); }
     raw = await T.getVault();
-    extra = { account, authKey: protectBuf(d.auth), wrapKey: protectBuf(d.wrap) };
+    extra = { account, authKey: protectBuf(d.auth), wrapKey: protectBuf(d.wrap), relay: extra.relay || null };
   }
-  if (sync.mode === 'server' && mode !== 'server') stopHubServer();
+  if (sync.mode === 'server' && mode !== 'server') { stopHubServer(); stopTunnel(); sync.internet = false; }
   Object.assign(sync, { mode, folder: mode === 'folder' ? folder : null, server: mode === 'client' ? server : null, port: mode === 'server' ? port : sync.port,
     deviceName: name, hashes: {}, tombstones: {}, joinedAt: Date.now(), removed: null, lastError: null, ...extra });
   setKey(key);
@@ -1613,10 +1625,11 @@ async function forgetAccount(id) {
 function normServerUrl(s) {
   s = String(s || '').trim(); if (!s) throw new Error('Введите адрес главного компьютера');
   if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
-  const u = new URL(s); if (!u.port) u.port = '47800';
+  const u = new URL(s); if (!u.port && u.protocol === 'http:') u.port = '47800';
   return `${u.protocol}//${u.host}`;
 }
 async function disconnectSync() {
+  stopTunnel(); sync.internet = false;
   try { if (syncConnected()) await transport().leave(); } catch {}
   stopHubServer();
   Object.assign(sync, { mode: null, folder: null, server: null, hashes: {}, tombstones: {}, lastError: null }); setKey(null);
@@ -1660,7 +1673,9 @@ const REVOKED_OK = new Set(['/v1/heartbeat', '/v1/ack', '/v1/leave']); // ото
 // для несуществующего имени отдаём правдоподобную соль, чтобы по ответу нельзя было подобрать имена доступов
 const fakeSalt = (name) => crypto.createHmac('sha256', unprotectBuf(sync.serverSecret) || Buffer.alloc(32)).update('salt:' + String(name).toLowerCase()).digest().subarray(0, 16).toString('base64');
 async function hubHandle(req, res) {
-  const ip = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  let ip = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  // запрос пришёл через туннель Cloudflare — настоящий адрес в заголовке (доверяем ему только от локального туннеля)
+  if ((ip === '127.0.0.1' || ip === '::1') && req.headers['cf-connecting-ip']) ip = String(req.headers['cf-connecting-ip']).slice(0, 45) + ' (интернет)';
   const url = new URL(String(req.url || '/'), 'http://hub');
   const p = url.pathname;
   const f = hubFails.get(ip);
@@ -1765,6 +1780,107 @@ function hubAddresses() {
   const order = { tailscale: 0, lan: 1, other: 2 };
   return out.sort((x, y) => order[x.kind] - order[y.kind]);
 }
+// ---- доступ через интернет без настройки сети
+// Главный компьютер открывает туннель Cloudflare (trycloudflare.com: без аккаунта, без портов на роутере).
+// Адрес туннеля меняется при каждом запуске, поэтому главный публикует его зашифрованным в ntfy.sh;
+// устройство по «коду подключения» находит актуальный адрес само. Обоим сервисам видны только шифротексты.
+const CF_BIN = path.join(DATA, 'bin', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+const CF_DOWNLOAD = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
+const RELAY = 'https://ntfy.sh';
+const tunnel = { status: 'off', url: null, error: null, child: null, progress: 0 };
+async function ensureCloudflared() {
+  if (fs.existsSync(CF_BIN) && fs.statSync(CF_BIN).size > 5e6) return;
+  if (process.platform !== 'win32') throw new Error('Установите cloudflared вручную');
+  tunnel.status = 'downloading'; tunnel.progress = 0; pushState();
+  const r = await fetch(CF_DOWNLOAD, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60000) });
+  if (!r.ok || !r.body) throw new Error('GitHub ответил ' + r.status);
+  const total = Number(r.headers.get('content-length')) || 0;
+  fs.mkdirSync(path.dirname(CF_BIN), { recursive: true });
+  const tmp = CF_BIN + '.download';
+  const out = fs.createWriteStream(tmp);
+  let got = 0, last = 0;
+  for await (const chunk of r.body) {
+    out.write(chunk); got += chunk.length;
+    if (total && Date.now() - last > 700) { last = Date.now(); tunnel.progress = Math.round(got / total * 100); pushState(); }
+  }
+  await new Promise((res) => out.end(res));
+  const head = Buffer.alloc(2); const fd = fs.openSync(tmp, 'r'); fs.readSync(fd, head, 0, 2, 0); fs.closeSync(fd);
+  if (got < 5e6 || head.toString() !== 'MZ') { fs.rmSync(tmp, { force: true }); throw new Error('скачан не тот файл'); }
+  fs.renameSync(tmp, CF_BIN);
+}
+let tunnelRestarts = 0;
+async function startTunnel() {
+  if (sync.mode !== 'server' || !sync.internet || tunnel.child) return;
+  try { await ensureCloudflared(); }
+  catch (e) { tunnel.status = 'error'; tunnel.error = 'Не удалось скачать cloudflared: ' + e.message; pushState(); return; }
+  if (sync.mode !== 'server' || !sync.internet || tunnel.child) return;
+  tunnel.status = 'starting'; tunnel.error = null; pushState();
+  const c = spawn(CF_BIN, ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${sync.port}`], { ...HIDE });
+  tunnel.child = c;
+  let log = '';
+  const onData = (d) => {
+    const s = String(d); log = (log + s).slice(-4000);
+    const m = s.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (m && m[0] !== tunnel.url) { tunnel.url = m[0]; tunnel.status = 'on'; tunnel.error = null; tunnelRestarts = 0; publishRelay(); pushState(); }
+  };
+  c.stdout.on('data', onData); c.stderr.on('data', onData);
+  c.on('error', (e) => { tunnel.error = e.message; });
+  c.on('close', () => {
+    if (tunnel.child !== c) return;
+    tunnel.child = null; tunnel.url = null;
+    if (sync.internet && sync.mode === 'server') {
+      tunnelRestarts++;
+      tunnel.status = 'starting';
+      if (tunnelRestarts > 3) { tunnel.status = 'error'; tunnel.error = 'Туннель не запускается. ' + (stripAnsi(log).match(/(ERR|error)[^\n]*/i)?.[0] || 'Проверьте интернет.'); }
+      setTimeout(startTunnel, Math.min(60000, 5000 * tunnelRestarts));
+    } else tunnel.status = 'off';
+    pushState();
+  });
+}
+function stopTunnel() { const c = tunnel.child; tunnel.child = null; tunnel.url = null; tunnel.status = 'off'; tunnel.error = null; if (c) { try { killTree(c); } catch {} } }
+const relayKey = () => unprotectBuf(sync.relay?.key);
+async function publishRelay() {
+  if (!tunnel.url || !sync.relay) return;
+  const body = JSON.stringify(seal(relayKey(), { url: tunnel.url, at: Date.now() }));
+  try {
+    const r = await fetch(`${RELAY}/${sync.relay.topic}`, { method: 'POST', body, signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new Error('ntfy ' + r.status);
+    sync.relay.publishedAt = Date.now(); saveSync();
+  } catch (e) { console.error('relay', e.message); tunnel.error = 'Адрес не опубликован (ntfy.sh недоступен) — повторю позже'; pushState(); }
+}
+setInterval(() => { if (tunnel.url) publishRelay(); }, 3 * 3600e3).unref(); // ntfy хранит сообщения 12 часов
+async function resolveRelay(topic, keyB64) {
+  let t;
+  try { t = await (await fetch(`${RELAY}/${encodeURIComponent(topic)}/json?poll=1&since=24h`, { signal: AbortSignal.timeout(15000) })).text(); }
+  catch { throw new Error('Нет связи с ntfy.sh — проверьте интернет'); }
+  let best = null;
+  for (const line of t.split('\n')) {
+    try { const ev = JSON.parse(line); if (ev.event !== 'message') continue; const m = unseal(Buffer.from(keyB64, 'base64'), JSON.parse(ev.message)); if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(m.url) && (!best || m.at > best.at)) best = m; } catch {}
+  }
+  if (!best) throw new Error('Главный компьютер сейчас не в сети: включите его и откройте Agent Hub');
+  return best.url;
+}
+function setInternet(on) {
+  if (sync.mode !== 'server') throw new Error('Сначала сделайте этот компьютер главным');
+  sync.internet = !!on;
+  if (on && !sync.relay) sync.relay = { topic: 'agenthub-' + crypto.randomBytes(16).toString('hex'), key: protectBuf(crypto.randomBytes(32)) };
+  saveSync();
+  if (on) { tunnelRestarts = 0; startTunnel(); } else stopTunnel();
+  pushState();
+}
+// код подключения: где искать адрес главного + имя доступа. Пароль в код не входит.
+function accountCode(id) {
+  const a = (sync.accounts || []).find((x) => x.id === id); if (!a) throw new Error('Нет такого доступа');
+  if (!sync.internet || !sync.relay) throw new Error('Сначала включите «Доступ через интернет»');
+  return { code: 'AH1-' + Buffer.from(JSON.stringify({ t: sync.relay.topic, k: relayKey().toString('base64'), a: a.name })).toString('base64url'), name: a.name };
+}
+function parseCode(s) {
+  const m = String(s || '').trim().match(/^AH1-([A-Za-z0-9_-]+)$/);
+  if (!m) return null;
+  try { const j = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8')); if (j.t && j.k && j.a) return j; } catch {}
+  throw new Error('Код подключения повреждён — скопируйте его заново');
+}
+
 function cloudCandidates() {
   const out = [], seen = new Set();
   const add = (label, p) => { if (!p) return; try { if (fs.existsSync(p) && !seen.has(p.toLowerCase())) { seen.add(p.toLowerCase()); out.push({ label, path: path.join(p, 'Agent Hub') }); } } catch {} };
@@ -1802,7 +1918,7 @@ function makeInstaller() {
 }
 const syncPublic = () => ({
   connected: syncConnected(), mode: sync.mode, folder: sync.folder, server: sync.server, port: sync.port,
-  serverRunning: !!hubServer, addresses: sync.mode === 'server' ? hubAddresses() : [],
+  serverRunning: !!hubServer, internet: !!sync.internet, tunnel: { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress }, viaCode: sync.mode === 'client' && !!sync.relay, addresses: sync.mode === 'server' ? hubAddresses() : [],
   deviceId: sync.deviceId, deviceName: sync.deviceName, lastSync: sync.lastSync, lastError: sync.lastError, removed: sync.removed,
   accounts: sync.mode === 'server' ? (sync.accounts || []).map((a) => ({ id: a.id, name: a.name, createdAt: a.createdAt, lastUsed: a.lastUsed, deviceId: a.deviceId, revoked: a.revoked })) : [],
   account: sync.mode === 'client' ? sync.account : null,
@@ -1945,6 +2061,8 @@ const routes = {
   'POST /api/sync/connect': async (b) => connectSync(b),
   'POST /api/sync/disconnect': async () => { await disconnectSync(); return { ok: true }; },
   'POST /api/sync/accounts': async (b) => addAccount(b),
+  'POST /api/sync/internet': async (b) => { setInternet(!!b.on); return { ok: true }; },
+  'GET /api/sync/accounts/:id/code': async (b, p) => accountCode(p.id),
   'POST /api/sync/accounts/:id/revoke': async (b, p) => { await revokeAccount(p.id); return { ok: true }; },
   'POST /api/sync/accounts/:id/forget': async (b, p) => { await forgetAccount(p.id); return { ok: true }; },
   'POST /api/sync/access-log/clear': async () => { sync.accessLog = []; saveSync(); pushState(); return { ok: true }; },
@@ -2125,6 +2243,7 @@ setInterval(() => {
 }, 3000).unref();
 
 function shutdown() {
+  stopTunnel();
   for (const b of busy.values()) killTree(b.child);
   for (const c of authSessions.values()) killTree(c);
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
@@ -2139,6 +2258,7 @@ if (!EMBEDDED) server.on('error', (e) => {
 function afterStart() {
   try { syncAllSkills(); } catch (e) { console.error('skills', e.message); }
   upgradeKeyProtection();
+  if (sync.mode === 'server' && sync.internet) setTimeout(startTunnel, 1500);
   if (sync.mode === 'server' && getKey()) startHubServer().catch((e) => console.error('hub', e.message));
   (syncConnected() ? syncNow() : Promise.resolve()).catch(() => {}).finally(() => Promise.all(state.agents.map(refreshAuth)).then(refreshAllModels));
 }
@@ -2158,6 +2278,7 @@ module.exports = {
   }),
   isBusy: () => busy.size > 0 || authSessions.size > 0 || installing.size > 0,
   shutdown: () => {
+    stopTunnel();
     for (const b of busy.values()) killTree(b.child);
     for (const c of authSessions.values()) killTree(c);
     try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}

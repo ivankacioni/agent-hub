@@ -585,10 +585,10 @@ dialog[open] { animation: pop .18s ease; }
     <div class="seg" id="syMode"><button data-m="server" class="on">Этот компьютер — главный</button><button data-m="client">Подключиться к главному</button><button data-m="folder">Облачная папка</button></div>
     <div id="syMainBox"><div class="hint">Этот компьютер будет хранить зашифрованные входы и раздавать их вашим устройствам — без облака. После включения создайте для каждого устройства доступ со своим паролем. Компьютер должен быть включён с открытым Agent Hub, когда другие устройства синхронизируются.</div></div>
     <div id="syServerBox" style="display:none">
-      <label class="f">Адрес главного компьютера</label><input class="input code" id="syServer" placeholder="например: 192.168.1.10:47800">
-      <div class="hint">Показан в настройках главного компьютера, в разделе «Устройства и синхронизация».</div>
-      <label class="f">Имя доступа</label><input class="input" id="syAccount" placeholder="например: Ноутбук" autocomplete="off">
-      <div class="hint">Доступ создают на главном компьютере — у каждого устройства свой.</div>
+      <label class="f">Код подключения или адрес главного компьютера</label><input class="input code" id="syServer" placeholder="AH1-… или 192.168.1.10:47800">
+      <div class="hint">Код — из любой сети: на главном «Доступ через интернет» → «Код» у доступа. Адрес — только в одной сети с главным.</div>
+      <div id="syAccountBox"><label class="f">Имя доступа</label><input class="input" id="syAccount" placeholder="например: Ноутбук" autocomplete="off">
+      <div class="hint">Доступ создают на главном компьютере — у каждого устройства свой.</div></div>
     </div>
     <div id="syFolderBox" style="display:none">
       <label class="f">Папка в облаке</label>
@@ -1456,17 +1456,25 @@ function renderSync() {
     h += `<div class="toggle-row" style="border:1px solid var(--line);border-radius:10px;padding:12px">${ic('cloud')}<div class="tt">Синхронизация выключена<small>Сделайте этот компьютер главным, подключитесь к главному или используйте облачную папку.</small></div><button class="btn primary sm" data-sy="open">${ic('cloud', 'sm')}Подключить</button></div>`;
     $('syncBox').innerHTML = h; return;
   }
-  h += `<div class="prow"><span style="width:110px;color:var(--muted)">Способ</span><span style="flex:1"><b>${MODE_RU[y.mode] || y.mode}</b>${y.mode === 'folder' ? ` · <span class="path selectable">${esc(y.folder)}</span>` : y.mode === 'client' ? ` · <span class="path selectable">${esc(y.server)}</span> · доступ «${esc(y.account || '')}»` : ''}</span></div>
+  h += `<div class="prow"><span style="width:110px;color:var(--muted)">Способ</span><span style="flex:1"><b>${MODE_RU[y.mode] || y.mode}</b>${y.mode === 'folder' ? ` · <span class="path selectable">${esc(y.folder)}</span>` : y.mode === 'client' ? `${y.viaCode ? ' · через интернет' : ` · <span class="path selectable">${esc(y.server)}</span>`} · доступ «${esc(y.account || '')}»` : ''}</span></div>
     <div class="prow"><span style="width:110px;color:var(--muted)">Состояние</span><span style="flex:1">${y.lastError ? `<span class="tagwarn">${ic('alert', 'sm')}${esc(y.lastError)}</span>` : `<span class="tagok">${ic('check', 'sm')}Синхронизировано ${ago(y.lastSync)}</span>`}${y.keyProtected ? ' <span class="hint" style="margin:0 0 0 8px">ключ защищён Windows</span>' : ''}</span>
       <button class="btn sm" data-sy="now">${ic('refresh', 'sm')}Сейчас</button></div>`;
   if (y.mode === 'server') {
     h += `<label class="f" style="margin-top:14px">Адрес для других устройств</label>
       ${y.serverRunning ? (y.addresses || []).map((a) => `<div class="prow"><span class="path selectable" style="flex:1">${esc(a.address)}</span><span class="hint" style="margin:0">${ADDR_RU[a.kind]}</span></div>`).join('') || '<div class="hint">Нет сетевых подключений</div>' : `<div class="tagwarn">${ic('alert', 'sm')}Сервер не запущен</div>`}
       <div class="hint">Главный компьютер отдаёт другим устройствам только зашифрованное хранилище, и только по доступу с личным паролем. Любой другой запрос получает отказ и попадает в журнал ниже. Если Windows спросит про брандмауэр — разрешите доступ для частных сетей. Чтобы подключаться не из дома, установите Tailscale на оба устройства.</div>
+      <div class="toggle-row" style="margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:10px 12px">${ic('cloud')}
+        <div class="tt">Доступ через интернет<small>${!y.internet ? 'Включите, чтобы подключать устройства из другой сети — без настройки роутера. Работает через туннель Cloudflare; видны только зашифрованные данные.'
+          : y.tunnel?.status === 'on' ? '<span style="color:var(--ok)">Работает.</span> Нажмите «Код» у доступа и отправьте код на то устройство.'
+          : y.tunnel?.status === 'downloading' ? `Скачиваю программу туннеля (один раз)… ${y.tunnel.progress || 0}%`
+          : y.tunnel?.status === 'error' ? `<span style="color:#f87171">${esc(y.tunnel.error || 'Ошибка')}</span>`
+          : 'Подключаюсь…'}</small></div>
+        <label class="switch"><input type="checkbox" data-sy="internet" ${y.internet ? 'checked' : ''}><span></span></label></div>
       <label class="f" style="margin-top:14px">Доступы устройств</label>
       ${(y.accounts || []).map((a) => `<div class="dev"><span class="di">${ic('user')}</span>
         <div class="dt"><b>${esc(a.name)}</b>
           <small>${a.revoked ? '<b style="color:#fbbf24">отозван — устройство выйдет из аккаунтов, когда будет в сети</b>' : a.deviceId ? `привязан к устройству · последний раз ${ago(a.lastUsed)}` : 'ещё не использовался'} · создан ${new Date(a.createdAt).toLocaleDateString('ru-RU')}</small></div>
+        ${!a.revoked && y.internet ? `<button class="btn sm" data-sy="acccode" data-a="${a.id}" title="Скопировать код подключения через интернет">${ic('link', 'sm')}Код</button>` : ''}
         ${a.revoked ? `<button class="btn sm" data-sy="accforget" data-a="${a.id}">Убрать из списка</button>` : `<button class="btn sm danger" data-sy="accrevoke" data-a="${a.id}" data-n="${esc(a.name)}">${ic('logout', 'sm')}Отозвать</button>`}
       </div>`).join('') || '<div class="hint">Доступов пока нет — создайте по одному на каждое устройство.</div>'}
       <div id="accForm" style="display:none;margin-top:8px;border:1px solid var(--line);border-radius:10px;padding:12px">
@@ -1502,6 +1510,9 @@ function renderSync() {
   h += `<div class="hint" style="margin-top:12px">Если устройство потеряно или украдено, выход отсюда сработает только когда оно выйдет в сеть. Чтобы отозвать доступ сразу, нажмите «выйти на всех устройствах» на сайте сервиса: ${REVOKE.map(([n, u]) => `<a href="#" data-url="${u}">${n}</a>`).join(' · ')}. Потом войдите заново на главном компьютере — новый вход сам разойдётся по остальным устройствам.</div>`;
   $('syncBox').innerHTML = h;
 }
+$('syncBox').addEventListener('change', async (e) => {
+  if (e.target.dataset.sy === 'internet') await api('POST', '/api/sync/internet', { on: e.target.checked });
+});
 $('syncBox').addEventListener('click', async (e) => {
   const lnk = e.target.closest('[data-url]'); if (lnk) { e.preventDefault(); return api('POST', '/api/open-url', { url: lnk.dataset.url }); }
   const b = e.target.closest('[data-sy]'); if (!b) return;
@@ -1519,6 +1530,11 @@ $('syncBox').addEventListener('click', async (e) => {
   }
   if (act === 'accrevoke' && await confirmBox(`Отозвать доступ «${b.dataset.n}»? Устройство с этим доступом выйдет из всех аккаунтов, как только будет в сети, а ключ хранилища сменится — старые данные на нём станут бесполезны. Остальные устройства продолжат работать.`, 'Отозвать', true)) { await api('POST', `/api/sync/accounts/${b.dataset.a}/revoke`); toast(`Доступ «${b.dataset.n}» отозван`); }
   if (act === 'accforget') await api('POST', `/api/sync/accounts/${b.dataset.a}/forget`);
+  if (act === 'acccode') {
+    const r = await api('GET', `/api/sync/accounts/${b.dataset.a}/code`);
+    try { await navigator.clipboard.writeText(r.code); toast(`Код для «${r.name}» скопирован. На том устройстве: «Подключить» → «Подключиться к главному» → вставьте код и пароль.`); }
+    catch { await confirmBox(`Код подключения для «${r.name}» (выделите и скопируйте):\n\n${r.code}`, 'Готово'); }
+  }
   if (act === 'now') { await api('POST', '/api/sync/now'); toast('Синхронизировано'); }
   if (act === 'installer') { await api('POST', '/api/sync/installer'); toast('Собираю установщик — это займёт минуту'); }
   if (act === 'leave' && await confirmBox(S.sync.mode === 'server' ? 'Выключить сервер? Другие устройства перестанут получать обновлённые входы, но то, что у них уже есть, останется.' : 'Отключить это устройство от синхронизации? Агенты и входы на нём останутся, но перестанут обновляться.', 'Отключить', true)) { await api('POST', '/api/sync/disconnect'); toast('Синхронизация выключена'); }
@@ -1548,7 +1564,7 @@ function setSyMode(m) {
 }
 $('syMode').onclick = (e) => { const b = e.target.closest('[data-m]'); if (b) setSyMode(b.dataset.m); };
 async function openSyncDlg() {
-  $('syName').value = S.sync?.deviceName || ''; $('syPass').value = ''; $('syFolder').value = ''; $('syServer').value = ''; $('syAccount').value = '';
+  $('syName').value = S.sync?.deviceName || ''; $('syPass').value = ''; $('syFolder').value = ''; $('syServer').value = ''; $('syAccount').value = ''; $('syAccountBox').style.display = '';
   setSyMode('server');
   $('syCands').innerHTML = '';
   $('syncDlg').showModal();
@@ -1556,6 +1572,7 @@ async function openSyncDlg() {
   $('syCands').innerHTML = c.length ? c.map((x) => `<button class="btn sm" data-cand="${esc(x.path)}">${ic('cloud', 'sm')}${esc(x.label)}</button>`).join('') : '<span class="hint" style="margin:0">Облачных папок не нашёл — выберите папку вручную.</span>';
   if (c.length === 1) $('syFolder').value = c[0].path;
 }
+$('syServer').addEventListener('input', () => { $('syAccountBox').style.display = /^\s*AH1-/.test($('syServer').value) ? 'none' : ''; });
 $('syCands').onclick = (e) => { const b = e.target.closest('[data-cand]'); if (b) $('syFolder').value = b.dataset.cand; };
 $('syPick').onclick = async () => { if (window.agentHub?.pickFolder) { const p = await window.agentHub.pickFolder(); if (p) $('syFolder').value = p; } else toast('Вставьте путь к папке вручную', 'err'); };
 $('syGo').onclick = async () => {
