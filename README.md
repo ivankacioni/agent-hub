@@ -3,6 +3,11 @@
 Приложение для Windows, в котором ИИ-агенты с разных аккаунтов (Google/Gemini, Claude, Codex)
 работают одной командой: общий чат, лидер раздаёт задачи, участники правят файлы проекта.
 
+## Скачать
+
+[AgentHub-win-x64.zip](https://github.com/ivankacioni/agent-hub/releases/latest/download/AgentHub-win-x64.zip) —
+распакуйте и запустите `AgentHub.exe`. Второй компьютер: [ВТОРОЙ-КОМПЬЮТЕР.md](ВТОРОЙ-КОМПЬЮТЕР.md).
+
 ## Запуск
 
 Ярлык **Agent Hub** на рабочем столе или в меню «Пуск».
