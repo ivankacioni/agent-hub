@@ -1,0 +1,16 @@
+{
+  "name": "agent-hub",
+  "productName": "Agent Hub",
+  "version": "2.0.0",
+  "description": "Команда ИИ-агентов: Gemini, Claude, Codex",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "node build-app.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.2.3"
+  }
+}

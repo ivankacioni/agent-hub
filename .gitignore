@@ -1,0 +1,10 @@
+# зависимости и сборка
+node_modules/
+release/
+dist/
+
+# личные данные: агенты, входы в аккаунты, чаты, проекты
+data/
+workspaces/
+*.log
+.agenthub/
