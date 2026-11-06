@@ -1340,18 +1340,24 @@ function clientT(base, creds = clientCreds()) {
     const time = String(Date.now()), nonce = crypto.randomBytes(12).toString('hex');
     let r;
     const send = () => fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Hub-Device': sync.deviceId, 'X-Hub-Account': encodeURIComponent(creds.account), 'X-Hub-Time': time, 'X-Hub-Nonce': nonce, 'X-Hub-Sig': hubSig(creds.auth, method, p, time, nonce, sync.deviceId, creds.account, body) }, body: body || undefined, signal: AbortSignal.timeout(30000) });
-    try { r = await send(); }
-    catch (e) {
-      // подключение по коду: адрес туннеля мог смениться — узнать новый и повторить
-      const relay = creds.relay || (sync.relay && sync.mode === 'client' ? { t: sync.relay.topic, k: unprotect(sync.relay.key) } : null);
-      if (!relay) throw new Error('Главный компьютер недоступен (' + base + '). Он должен быть включён, Agent Hub открыт.');
+    // ответ «наш» — только JSON от Agent Hub; страница ошибки туннеля значит, что адрес устарел
+    const attempt = async () => {
+      const res = await send(); const txt = await res.text();
+      let js = null, ours = false; try { js = txt ? JSON.parse(txt) : null; ours = true; } catch {}
+      if (/text\/html/i.test(res.headers.get('content-type') || '')) ours = false;
+      return { res, txt, js, ours };
+    };
+    let x = null;
+    try { x = await attempt(); } catch {}
+    const relay = creds.relay || (sync.relay && sync.mode === 'client' ? { t: sync.relay.topic, k: unprotect(sync.relay.key) } : null);
+    if ((!x || !x.ours) && relay) {
+      // подключение по коду: адрес туннеля сменился — узнать новый и повторить
       const nu = await resolveRelay(relay.t, relay.k);
-      if (nu === base) throw new Error('Главный компьютер недоступен. Он должен быть включён, Agent Hub открыт.');
-      base = nu; if (sync.mode === 'client' && !creds.relay) { sync.server = nu; saveSync(); }
-      try { r = await send(); } catch { throw new Error('Главный компьютер недоступен. Он должен быть включён, Agent Hub открыт.'); }
+      if (nu !== base) { base = nu; if (sync.mode === 'client' && !creds.relay) { sync.server = nu; saveSync(); } try { x = await attempt(); } catch { x = null; } }
     }
-    if (r.status === 502 || r.status === 530) throw new Error('Главный компьютер сейчас не в сети: включите его и откройте Agent Hub');
-    const t = await r.text(); let j = null; try { j = t ? JSON.parse(t) : null; } catch {}
+    if (!x) throw new Error('Главный компьютер недоступен' + (relay ? '' : ' (' + base + ')') + '. Он должен быть включён, Agent Hub открыт.');
+    if (!x.ours) throw new Error('Главный компьютер сейчас не в сети: включите его и откройте Agent Hub');
+    r = x.res; const t = x.txt; const j = x.js;
     if (r.status === 401) throw new Error('Главный компьютер не принял имя доступа или пароль');
     if (r.status === 403) throw new Error(j?.error || 'Главный компьютер отказал в доступе');
     if (r.status === 429) throw new Error('Главный компьютер временно заблокировал это устройство из-за неверных попыток');
@@ -1552,13 +1558,18 @@ async function connectSync({ mode, folder, server, password, deviceName, port, a
   } else {
     // адрес или код подключения (AH1-…): по коду адрес туннеля находится сам
     const code = parseCode(server);
-    if (code) { server = await resolveRelay(code.t, code.k); account = account || code.a; extra.relay = { topic: code.t, key: protect(code.k) }; }
+    if (code) { account = account || code.a; extra.relay = { topic: code.t, key: protect(code.k) }; }
     else server = normServerUrl(server);
     account = String(account || '').trim();
     if (!account) throw new Error('Введите имя доступа — его создают на главном компьютере');
-    let hello;
-    try { hello = await (await fetch(server + '/v1/hello?account=' + encodeURIComponent(account), { signal: AbortSignal.timeout(10000) })).json(); }
-    catch { throw new Error('Не удалось связаться с главным компьютером ' + server + '. Проверьте адрес, что он включён и в нём открыт Agent Hub.'); }
+    let hello = null;
+    // по коду: адрес туннеля мог только что смениться — несколько попыток со свежим адресом
+    for (let i = 0; i < (code ? 4 : 1) && !hello; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 4000));
+      if (code) server = await resolveRelay(code.t, code.k);
+      try { const j = await (await fetch(server + '/v1/hello?account=' + encodeURIComponent(account), { signal: AbortSignal.timeout(15000) })).json(); if (j?.app === 'agent-hub') hello = j; } catch {}
+    }
+    if (!hello) throw new Error(code ? 'Главный компьютер сейчас не в сети: включите его и откройте Agent Hub' : 'Не удалось связаться с главным компьютером ' + server + '. Проверьте адрес, что он включён и в нём открыт Agent Hub.');
     if (hello?.app !== 'agent-hub' || !hello.salt) throw new Error('По этому адресу не Agent Hub в режиме главного компьютера');
     if ((hello.v || 1) < 2) throw new Error('На главном компьютере старая версия Agent Hub — обновите её');
     const d = hubDerive(password, hello.salt);
@@ -1675,7 +1686,9 @@ const fakeSalt = (name) => crypto.createHmac('sha256', unprotectBuf(sync.serverS
 async function hubHandle(req, res) {
   let ip = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   // запрос пришёл через туннель Cloudflare — настоящий адрес в заголовке (доверяем ему только от локального туннеля)
-  if ((ip === '127.0.0.1' || ip === '::1') && req.headers['cf-connecting-ip']) ip = String(req.headers['cf-connecting-ip']).slice(0, 45) + ' (интернет)';
+  // (Cloudflare — cf-connecting-ip, localhost.run — x-forwarded-for)
+  const fwd = req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  if ((ip === '127.0.0.1' || ip === '::1') && fwd) ip = String(fwd).slice(0, 45) + ' (интернет)';
   const url = new URL(String(req.url || '/'), 'http://hub');
   const p = url.pathname;
   const f = hubFails.get(ip);

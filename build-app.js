@@ -25,7 +25,7 @@ const { execFileSync } = require('child_process');
     icon: path.join(root, 'electron', 'icon.ico'),
     appCopyright: 'Agent Hub',
     win32metadata: { ProductName: 'Agent Hub', FileDescription: 'Agent Hub', CompanyName: 'Agent Hub', InternalName: 'AgentHub', OriginalFilename: 'AgentHub.exe' },
-    ignore: [/^\/release($|\/)/, /^\/dist($|\/)/, /^\/data($|\/)/, /^\/workspaces($|\/)/, /^\/build\.js$/, /^\/build-app\.js$/, /^\/README\.md$/],
+    ignore: [/^\/release($|\/)/, /^\/dist($|\/)/, /^\/data($|\/)/, /^\/workspaces($|\/)/, /^\/build\.js$/, /^\/build-app\.js$/, /\.md$/, /^\/\.git/],
   });
   console.log('Собрано:', out);
   if (process.argv.includes('--no-install')) return;
