@@ -1821,7 +1821,8 @@ const TUNNEL_PROVIDERS = [
     args: () => [SSH_BIN, ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${path.join(DATA, 'known_hosts')}`,
       '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-o', 'ExitOnForwardFailure=yes', '-R', `80:127.0.0.1:${sync.port}`, 'nokey@localhost.run']],
     url: /https:\/\/[a-z0-9-]+\.lhr\.life/,
-    blocked: (log) => /Permission denied|Connection (refused|timed out|reset)|Could not resolve/i.test(log) },
+    // только настоящие ошибки ssh (в приветствии localhost.run есть фраза «permission denied error» — это не ошибка)
+    blocked: (log) => /^[\w@.-]*:? ?Permission denied \(|^ssh: connect to host .* (Connection refused|Connection timed out|Network is unreachable)|^ssh: Could not resolve hostname|^Connection (reset|closed) by /m.test(log) },
 ];
 let tunnelRestarts = 0, providerIdx = 0;
 async function startTunnel() {
