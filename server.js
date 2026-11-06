@@ -1786,10 +1786,13 @@ function makeInstaller() {
   const out = path.join(destDir, 'Agent Hub — установка.zip');
   installerBusy = true; pushState();
   const tmp = path.join(os.tmpdir(), 'agenthub-installer-' + Date.now() + '.zip');
-  const c = spawn(TAR, ['-a', '-c', '-f', tmp, '-C', appDir, '.'], { ...HIDE });
+  // zip через .NET ZipFile: такой архив распаковывает «Проводник» (zip от tar.exe он не открывает)
+  const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:AH_SRC, $env:AH_OUT, [System.IO.Compression.CompressionLevel]::Optimal, $false)'],
+  { ...HIDE, env: { ...process.env, AH_SRC: appDir, AH_OUT: tmp } });
   c.on('close', (code) => {
     try {
-      if (code !== 0) throw new Error('tar завершился с кодом ' + code);
+      if (code !== 0) throw new Error('архивация завершилась с кодом ' + code);
       fs.copyFileSync(tmp, out);
       broadcast('toast', { text: `Установщик готов: ${out}` });
     } catch (e) { broadcast('toast', { text: 'Не удалось сделать установщик: ' + e.message, kind: 'err' }); }
