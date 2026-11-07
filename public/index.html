@@ -244,6 +244,26 @@ kbd { font: 11px var(--mono); background: var(--surface2); border: 1px solid var
 .dev .dt { flex: 1; min-width: 0; } .dev .dt small { display: block; color: var(--muted); font-size: 11.5px; }
 .sync-banner { margin: 0 0 14px; padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(248,113,113,.35); background: rgba(248,113,113,.08); display: flex; gap: 10px; align-items: center; }
 .cands { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.atts { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px 0; }
+.att { display: flex; align-items: center; gap: 8px; max-width: 260px; padding: 4px 6px 4px 4px; border: 1px solid var(--line2); border-radius: 10px; background: var(--bg2); }
+.att img { width: 42px; height: 42px; object-fit: cover; border-radius: 7px; flex: none; }
+.att .ai { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 7px; background: var(--accent-soft); color: #a99dff; flex: none; }
+.att .an { min-width: 0; display: flex; flex-direction: column; font-size: 12px; }
+.att .an b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.att .an small { color: var(--muted); font-size: 11px; }
+.att .ax { border: none; background: transparent; color: var(--muted); cursor: pointer; padding: 4px; border-radius: 6px; flex: none; }
+.att .ax:hover { color: var(--text); background: var(--surface3); }
+.composer.drag { outline: 2px dashed rgba(123,108,255,.7); outline-offset: 3px; }
+.clipbtn { border: none; background: transparent; color: var(--muted); cursor: pointer; padding: 6px; border-radius: 8px; display: grid; place-items: center; }
+.clipbtn:hover { color: var(--text); background: var(--surface3); }
+.mfiles { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.mimg { max-width: min(320px, 100%); max-height: 240px; border-radius: 9px; cursor: zoom-in; border: 1px solid var(--line); display: block; }
+.mfile { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid var(--line2); border-radius: 8px; background: var(--bg2); font-size: 12px; cursor: pointer; }
+.mfile small { color: var(--muted); }
+.mfile:hover { border-color: rgba(123,108,255,.5); }
+#imgDlg { padding: 0; background: transparent; border: none; max-width: 94vw; max-height: 92vh; }
+#imgDlg img { max-width: 94vw; max-height: 92vh; display: block; border-radius: 10px; }
+#imgDlg::backdrop { background: rgba(0,0,0,.75); }
 .empty-card { text-align: center; color: var(--muted); padding: 40px 20px; border: 1px dashed var(--line2); border-radius: var(--r2); grid-column: 1 / -1; }
 
 /* ---------- панель агента */
@@ -386,8 +406,9 @@ dialog[open] { animation: pop .18s ease; }
       <div class="composer-wrap">
         <div class="composer">
           <div class="ac" id="ac"></div>
-          <textarea id="input" rows="1" placeholder="Опишите задачу — лидер распределит её по команде…"></textarea>
-          <div class="bar"><div class="achips" id="chips"></div><span class="flex"></span><label class="disc" id="discLbl" title="Перед работой все агенты предлагают подход (без изменения файлов), затем лидер собирает единый план"><span class="switch"><input type="checkbox" id="discuss"><span></span></span>Обсудить сначала</label><button class="sendbtn" id="send" title="Отправить"><svg class="i"><use href="#i-send"/></svg></button></div>
+          <div class="atts" id="atts" style="display:none"></div>
+          <textarea id="input" rows="1" placeholder="Опишите задачу — лидер распределит её по команде… Скриншот — Ctrl+V, файлы — перетащите сюда"></textarea>
+          <div class="bar"><button class="clipbtn" id="attach" title="Прикрепить файлы — или Ctrl+V для скриншота, или перетащите сюда"><svg class="i"><use href="#i-clip"/></svg></button><input type="file" id="attachInput" multiple style="display:none"><div class="achips" id="chips"></div><span class="flex"></span><label class="disc" id="discLbl" title="Перед работой все агенты предлагают подход (без изменения файлов), затем лидер собирает единый план"><span class="switch"><input type="checkbox" id="discuss"><span></span></span>Обсудить сначала</label><button class="sendbtn" id="send" title="Отправить"><svg class="i"><use href="#i-send"/></svg></button></div>
         </div>
         <div class="composer-hint" id="hint"></div>
       </div>
@@ -572,6 +593,8 @@ dialog[open] { animation: pop .18s ease; }
   <div class="df"><span class="flex"></span><button class="btn" data-close>Отмена</button><button class="btn primary" id="mjSave"><svg class="i"><use href="#i-check"/></svg>Добавить</button></div>
 </dialog>
 
+<dialog id="imgDlg"><img id="imgView" alt=""></dialog>
+
 <dialog id="confirmDlg">
   <div class="dh"><h3 id="cTitle">Подтверждение</h3></div>
   <div class="db"><div id="cText" style="color:var(--text2)"></div></div>
@@ -650,6 +673,7 @@ dialog[open] { animation: pop .18s ease; }
     <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol>
     <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="11" rx="2"/><path d="M2 20h20"/></symbol>
     <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
+    <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
     <symbol id="i-git" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M3 12h6M15 12h6"/></symbol>
   </defs>
 </svg>
@@ -850,7 +874,7 @@ function renderMsgs(force) {
       return `<div class="msg sys ${done ? 'done' : ''}"><span class="bubble">${done ? ic('check-c', 'sm') : ''}${esc(m.text.replace(/^[✅⏹]\s*/u, ''))}</span></div>`;
     }
     const time = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    if (m.from === 'user') return `<div class="msg user"><span class="me-av">${ic('user')}</span><div class="body"><div class="head"><span class="tag">${time}</span><span class="who">Вы</span></div><div class="bubble md">${md(m.text, names)}</div></div></div>`;
+    if (m.from === 'user') return `<div class="msg user"><span class="me-av">${ic('user')}</span><div class="body"><div class="head"><span class="tag">${time}</span><span class="who">Вы</span></div><div class="bubble md">${md(m.text, names)}${filesHtml(m)}</div></div></div>`;
     const a = agent(m.agentId) || { name: m.name || '?', provider: 'custom' };
     const isL = m.agentId === S.leaderId;
     return `<div class="msg agent ${m.ok === false ? 'err' : ''}">${avatar(a)}<div class="body">
@@ -886,9 +910,21 @@ $('stop').onclick = () => api('POST', `/api/projects/${project().id}/stop`);
 $('openFolder').onclick = () => api('POST', `/api/projects/${project().id}/open`);
 $('msgsInner').addEventListener('click', async (e) => {
   const u = e.target.closest('[data-update]'); if (u) startInstall(u.dataset.update, true);
+  const iv = e.target.closest('[data-view]'); if (iv) { $('imgView').src = iv.dataset.view; $('imgDlg').showModal(); }
+  const of = e.target.closest('[data-openfile]'); if (of) api('POST', `/api/projects/${project().id}/open-file`, { rel: of.dataset.openfile });
   const rv = e.target.closest('[data-revert]');
   if (rv && await confirmBox('Отменить изменения файлов, сделанные на этом шаге?', 'Откатить', true)) { await api('POST', `/api/projects/${project().id}/revert`, { sha: rv.dataset.revert }); toast('Изменения шага отменены'); }
 });
+const fmtSz = (n) => n < 1024 ? n + ' Б' : n < 1048576 ? Math.round(n / 1024) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ';
+function filesHtml(m) {
+  if (!m.files?.length) return '';
+  const pid = project().id;
+  return `<div class="mfiles">${m.files.map((f) => {
+    const src = `/files/${pid}/${f.rel.split('/').map(encodeURIComponent).join('/')}`;
+    return f.kind === 'image' ? `<img class="mimg" src="${src}" data-view="${src}" title="${esc(f.name)}" loading="lazy" alt="">`
+      : `<span class="mfile" data-openfile="${esc(f.rel)}" title="Показать в папке">${ic('file', 'sm')}${esc(f.name)}<small>${fmtSz(f.size)}</small></span>`;
+  }).join('')}</div>`;
+}
 function changesHtml(m) {
   const c = m.changes; if (!c) return '';
   const n = c.total || c.files.length;
@@ -950,10 +986,63 @@ $('memReload').onclick = async () => { if (memDirty && !(await confirmBox('От�
 const input = $('input');
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 220) + 'px'; }
 input.addEventListener('input', () => { autosize(); updateAc(); });
+// ---------- вложения: скрепка, Ctrl+V (скриншоты и длинный текст), перетаскивание
+let pending = [], pasteN = 0, sending = false;
+const PASTE_AS_FILE = 2000; // длиннее — прикрепляем файлом, как «[Pasted text]» в Claude Code
+function addPending(file, name) {
+  if (pending.length >= 20) return toast('Не больше 20 файлов в одном сообщении', 'err');
+  if (file.size > 25 * 1024 * 1024) return toast(`«${name || file.name}» больше 25 МБ`, 'err');
+  const isImg = /^image\/(png|jpe?g|gif|webp|bmp)$/.test(file.type);
+  pending.push({ file, name: name || file.name || 'file', img: isImg ? URL.createObjectURL(file) : null, size: file.size });
+  renderPending();
+}
+function renderPending() {
+  $('atts').innerHTML = pending.map((p, i) => `<div class="att">${p.img ? `<img src="${p.img}" alt="">` : `<span class="ai">${ic('file')}</span>`}<div class="an"><b title="${esc(p.name)}">${esc(p.name)}</b><small>${fmtSz(p.size)}</small></div><button class="ax" data-rm="${i}" title="Убрать">${ic('x', 'sm')}</button></div>`).join('');
+  $('atts').style.display = pending.length ? '' : 'none';
+}
+$('atts').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (!b) return; const p = pending.splice(+b.dataset.rm, 1)[0]; if (p?.img) URL.revokeObjectURL(p.img); renderPending(); input.focus(); };
+$('attach').onclick = () => $('attachInput').click();
+$('attachInput').onchange = (e) => { for (const f of e.target.files) addPending(f); e.target.value = ''; input.focus(); };
+const stamp = () => new Date().toTimeString().slice(0, 8).replace(/:/g, '');
+input.addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.items || [])].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter(Boolean);
+  if (files.length) {
+    e.preventDefault();
+    for (const f of files) {
+      const ext = ((f.type.split('/')[1] || 'png').replace('jpeg', 'jpg').replace(/[^a-z0-9]/g, '')) || 'bin';
+      addPending(f, f.name && !/^image\.\w+$/i.test(f.name) ? f.name : `screenshot-${stamp()}.${ext}`);
+    }
+    return;
+  }
+  const text = e.clipboardData?.getData('text/plain') || '';
+  const lines = text.split('\n').length;
+  if (text.length > PASTE_AS_FILE || lines > 60) {
+    e.preventDefault(); pasteN++;
+    addPending(new File([text], `pasted-text-${pasteN}.txt`, { type: 'text/plain' }));
+    toast(`Длинный текст (${lines} строк) прикреплён файлом`);
+  }
+});
+const chatView = $('view-chat'), composer = document.querySelector('.composer');
+chatView.addEventListener('dragover', (e) => { if (![...(e.dataTransfer?.types || [])].includes('Files')) return; e.preventDefault(); composer.classList.add('drag'); });
+chatView.addEventListener('dragleave', (e) => { if (!chatView.contains(e.relatedTarget)) composer.classList.remove('drag'); });
+chatView.addEventListener('drop', (e) => {
+  composer.classList.remove('drag');
+  const files = [...(e.dataTransfer?.files || [])].filter((f) => f.size > 0 || f.type);
+  if (!files.length) return;
+  e.preventDefault(); e.stopPropagation();
+  for (const f of files) addPending(f);
+  input.focus();
+});
 async function sendMsg() {
-  const text = input.value.trim(); if (!text) return;
-  await api('POST', `/api/projects/${project().id}/message`, { text });
-  input.value = ''; autosize(); hideAc();
+  const text = input.value.trim(); if ((!text && !pending.length) || sending) return;
+  sending = true; $('send').disabled = true;
+  try {
+    const files = [];
+    for (const p of pending) files.push({ name: p.name, data: await readB64(p.file) });
+    await api('POST', `/api/projects/${project().id}/message`, { text, files });
+    input.value = ''; autosize(); hideAc();
+    pending.forEach((p) => p.img && URL.revokeObjectURL(p.img)); pending = []; renderPending();
+  } catch {} finally { sending = false; $('send').disabled = false; }
 }
 $('send').onclick = sendMsg;
 $('chips').addEventListener('click', (e) => {

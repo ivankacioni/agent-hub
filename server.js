@@ -283,12 +283,16 @@ function git(project, args) {
 async function gitEnsure(project) {
   if (project.git === false || !(await gitAvailable())) return false;
   const gd = gitDir(project);
-  if (fs.existsSync(path.join(gd, 'HEAD'))) return true;
+  if (fs.existsSync(path.join(gd, 'HEAD'))) {
+    const ex = path.join(gd, 'info', 'exclude');
+    try { const t = fs.readFileSync(ex, 'utf8'); if (!t.includes('.agenthub/uploads/')) fs.appendFileSync(ex, '\n.agenthub/uploads/\n'); } catch {}
+    return true;
+  }
   fs.mkdirSync(gd, { recursive: true });
   const r = await runCaptureNoShell('git', ['--git-dir', gd, 'init', '-q'], { cwd: project.workspace });
   if (r.code !== 0) return false;
   fs.mkdirSync(path.join(gd, 'info'), { recursive: true });
-  fs.writeFileSync(path.join(gd, 'info', 'exclude'), ['.agenthub/history/', '.git/', 'node_modules/', '.venv/', 'venv/', '__pycache__/', '*.pyc', '.DS_Store', 'Thumbs.db', ''].join('\n'));
+  fs.writeFileSync(path.join(gd, 'info', 'exclude'), ['.agenthub/history/', '.agenthub/uploads/', '.git/', 'node_modules/', '.venv/', 'venv/', '__pycache__/', '*.pyc', '.DS_Store', 'Thumbs.db', ''].join('\n'));
   await gitCommit(project, 'Начальное состояние проекта');
   return true;
 }
@@ -508,6 +512,66 @@ function killTree(child) {
   else child.kill('SIGTERM');
 }
 
+// ---------------------------------------------------------------- вложения в чате (картинки, скриншоты, файлы, длинный текст)
+// Файлы кладутся в папку проекта: .agenthub/uploads/<время>-<id>/<имя> — их видят все агенты команды.
+const UPLOAD_MAX_FILE = 25 * 1024 * 1024, UPLOAD_MAX_TOTAL = 55 * 1024 * 1024, UPLOAD_MAX_COUNT = 20;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+const TEXT_EXT = /\.(txt|md|markdown|log|csv|tsv|json|ya?ml|xml|html?|css|scss|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|bat|ps1|sql|toml|ini|cfg|conf|env|lua|swift|dart|vue|svelte)$/i;
+const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8', json: 'application/json; charset=utf-8', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg' };
+const attachKind = (name) => IMAGE_EXT.test(name) ? 'image' : TEXT_EXT.test(name) ? 'text' : 'file';
+// имя без символов, опасных для командной строки и путей
+function safeFileName(n) {
+  let s = String(n || 'file').split(/[\\/]/).pop().normalize('NFC').replace(/[\s&|<>^%!"'`()$;,*?:[\]{}=+#@~]+/g, '_').replace(/_+/g, '_').replace(/^[._-]+/, '').slice(-100);
+  return s || 'file';
+}
+function saveAttachments(project, files) {
+  if (!Array.isArray(files) || !files.length) return [];
+  if (files.length > UPLOAD_MAX_COUNT) throw new Error(`Не больше ${UPLOAD_MAX_COUNT} файлов в одном сообщении`);
+  const bufs = files.map((f) => ({ name: safeFileName(f.name), buf: Buffer.from(String(f.data || ''), 'base64') }));
+  const big = bufs.find((b) => b.buf.length > UPLOAD_MAX_FILE);
+  if (big) throw new Error(`Файл «${big.name}» больше 25 МБ`);
+  if (bufs.reduce((s, b) => s + b.buf.length, 0) > UPLOAD_MAX_TOTAL) throw new Error('Вложения больше 55 МБ вместе — отправьте частями');
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const relDir = `.agenthub/uploads/${stamp}-${crypto.randomBytes(3).toString('hex')}`;
+  const dir = path.join(project.workspace, relDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const used = new Set();
+  return bufs.map((b) => {
+    let name = b.name, i = 2;
+    while (used.has(name.toLowerCase())) name = b.name.replace(/(\.[^.]*)?$/, `-${i++}$1`);
+    used.add(name.toLowerCase());
+    fs.writeFileSync(path.join(dir, name), b.buf);
+    return { name, rel: `${relDir}/${name}`, size: b.buf.length, kind: attachKind(name) };
+  });
+}
+const fmtSize = (n) => n < 1024 ? n + ' Б' : n < 1048576 ? Math.round(n / 1024) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ';
+// вложения из последних сообщений пользователя — то, что агент должен увидеть
+function recentAttachments(project) {
+  const msgs = project.messages.slice(-state.settings.historyLimit).filter((m) => m.from === 'user' && m.files?.length);
+  const all = msgs.flatMap((m) => m.files.filter((f) => fs.existsSync(path.join(project.workspace, f.rel))));
+  const last = msgs.length ? msgs[msgs.length - 1].files.filter((f) => fs.existsSync(path.join(project.workspace, f.rel))) : [];
+  return { all, last };
+}
+function attachmentsPrompt(project, agent) {
+  const { all } = recentAttachments(project);
+  if (!all.length) return '';
+  const lines = all.map((f) => `- ${f.rel} (${f.kind === 'image' ? 'изображение' : f.kind === 'text' ? 'текст' : 'файл'}, ${fmtSize(f.size)})`);
+  const how = agent.provider === 'codex' ? 'Изображения из последнего сообщения уже приложены к запросу; остальные файлы открой сам по пути.'
+    : agent.provider === 'gemini' ? 'Файлы из последнего сообщения подключены к запросу; остальные открой сам по пути.'
+    : 'Открой их инструментом чтения файлов (Read) по относительному пути — изображения он тоже показывает.';
+  // текстовые вложения последнего сообщения — прямо в запрос: так их увидит любой агент, даже без прав на чтение файлов
+  let inline = '', budget = 80000;
+  for (const f of recentAttachments(project).last.filter((x) => x.kind === 'text')) {
+    if (budget <= 0) break;
+    let body = ''; try { body = fs.readFileSync(path.join(project.workspace, f.rel), 'utf8'); } catch { continue; }
+    const cut = body.length > Math.min(40000, budget);
+    body = body.slice(0, Math.min(40000, budget)); budget -= body.length;
+    inline += `\n--- ${f.rel}${cut ? ' (начало, файл длиннее — остальное прочитай сам)' : ''} ---\n${body}\n--- конец ${f.name} ---\n`;
+  }
+  return `\n=== Файлы, которые прислал пользователь (в папке проекта) ===\n${lines.join('\n')}\n${how} Учитывай их содержимое в работе. Эти файлы не удаляй и не меняй.` +
+    (inline ? `\nСодержимое текстовых вложений из последнего сообщения:${inline}` : '');
+}
+
 // ---------------------------------------------------------------- промпт: общий контекст команды
 async function buildPrompt(project, agent, job) {
   const isLeader = agent.id === state.leaderId;
@@ -516,7 +580,8 @@ async function buildPrompt(project, agent, job) {
   const hist = project.messages.slice(-state.settings.historyLimit).map((m) => {
     const who = m.from === 'user' ? 'Пользователь' : m.from === 'system' ? 'Система' : (agentById(m.agentId)?.name || m.name || m.from);
     const t = m.text.length > 4000 ? m.text.slice(0, 4000) + '\n…(обрезано)' : m.text;
-    return `[${who}${m.taskId ? ` · задача #${m.taskId}` : ''}]: ${t}`;
+    const att = m.files?.length ? `\n[вложения: ${m.files.map((x) => x.rel).join(', ')}]` : '';
+    return `[${who}${m.taskId ? ` · задача #${m.taskId}` : ''}]: ${t}${att}`;
   }).join('\n\n');
   let memory = readMemory(project);
   if (memory.length > MAX_PROMPT_MEMORY) memory = memory.slice(0, MAX_PROMPT_MEMORY) + '\n…(дальше — прочитай файл .agenthub/MEMORY.md целиком)';
@@ -551,6 +616,7 @@ async function buildPrompt(project, agent, job) {
     agent.instructions ? `Личные инструкции: ${agent.instructions}` : '',
     skillsPrompt(agent),
     mcpPrompt(agent),
+    attachmentsPrompt(project, agent),
     memRule,
     `\n=== Команда ===\n${team}`,
     `\n=== Проект ===\n"${project.name}". Рабочая папка (текущая директория): ${project.workspace}` + (project.goal ? `\nЦель: ${project.goal}` : ''),
@@ -561,6 +627,7 @@ async function buildPrompt(project, agent, job) {
     `\n=== История общего чата ===\n${hist || '(пусто)'}`,
     t ? `\n=== Твоя задача #${t.id} (от ${job.from}) ===\n${job.task}` + (t.files.length ? `\nТвои файлы: ${t.files.join(', ')}` : '') :
       `\n=== ${job.mode === 'discuss' ? 'Задача для обсуждения' : 'Текущее задание'} (от ${job.from}) ===\n${job.task}`,
+    agent.provider === 'gemini' && recentAttachments(project).last.length ? `\nПриложенные файлы: ${recentAttachments(project).last.map((x) => '@' + x.rel).join(' ')}` : '',
     `\nОтветь одним сообщением в чат на русском языке.`,
   ].filter(Boolean).join('\n');
 }
@@ -628,7 +695,11 @@ async function runAgent(project, job) {
     if (!cmd) return finish('❌ Для своей команды не указана команда запуска.', false);
   } else {
     cmd = prov.bin;
-    args = [...prov.args({ ...agent, model: safeModel(agent.model) }, { readOnly: job.mode === 'discuss' }), ...mcpArgs(agent, job.mode === 'discuss')];
+    args = [...prov.args({ ...agent, model: safeModel(agent.model) }, { readOnly: job.mode === 'discuss' }), ...mcpArgs(agent, job.mode === 'discuss'), ...claudeAllowed(agent, job.mode === 'discuss')];
+    if (agent.provider === 'codex') {
+      const imgs = recentAttachments(project).last.filter((x) => x.kind === 'image').map((x) => x.rel);
+      if (imgs.length) args.splice(1, 0, '--image', ...imgs);
+    }
   }
 
   let child;
@@ -1163,10 +1234,14 @@ function mcpArgs(agent, readOnly) {
   const list = mcpFor(agent);
   if (!list.length || agent.provider !== 'claude') return [];
   const q = (s) => (WIN ? `"${s}"` : `'${s}'`); // запуск идёт через оболочку, в пути есть пробелы
-  const out = ['--mcp-config', q(CLAUDE_MCP_FILE(profileOf(agent)))];
-  // в обычном режиме Claude спрашивает разрешение на каждый инструмент — заранее разрешаем подключённые серверы
-  if (!readOnly && agent.autonomy !== 'full') out.push('--allowedTools', ...list.map((m) => `mcp__${m.name}`));
-  return out;
+  return ['--mcp-config', q(CLAUDE_MCP_FILE(profileOf(agent)))];
+}
+// в обычном режиме Claude спрашивает разрешение на инструменты, а ответить в фоне некому:
+// заранее разрешаем чтение файлов (вложения, картинки) и подключённые MCP-серверы
+function claudeAllowed(agent, readOnly) {
+  if (agent.provider !== 'claude' || agent.autonomy === 'full') return [];
+  const tools = ['Read', ...(readOnly ? [] : mcpFor(agent).map((m) => `mcp__${m.name}`))];
+  return ['--allowedTools', ...tools];
 }
 function mcpPrompt(agent) {
   const list = mcpFor(agent);
@@ -2174,10 +2249,22 @@ const routes = {
   },
   'POST /api/projects/:id/message': async (b, p) => {
     const pr = projectById(p.id); if (!pr) throw new Error('Нет проекта');
-    const text = String(b.text || '').trim(); if (!text) throw new Error('Пустое сообщение');
+    let text = String(b.text || '').trim();
+    const hasFiles = Array.isArray(b.files) && b.files.length;
+    if (!text && !hasFiles) throw new Error('Пустое сообщение');
     if (!state.agents.some((a) => a.enabled)) throw new Error('Добавьте хотя бы одного агента');
-    addMessage(pr, { from: 'user', text });
+    const files = saveAttachments(pr, b.files || []);
+    if (!text) text = files.length === 1 ? 'Посмотри приложенный файл.' : 'Посмотри приложенные файлы.';
+    addMessage(pr, { from: 'user', text, ...(files.length ? { files } : {}) });
     startFromUser(pr, text);
+    return { ok: true };
+  },
+  'POST /api/projects/:id/open-file': async (b, p) => {
+    const pr = projectById(p.id); if (!pr) throw new Error('Нет проекта');
+    const rel = String(b.rel || '');
+    if (!rel.startsWith('.agenthub/uploads/') || rel.includes('..')) throw new Error('Нет такого файла');
+    const fp = path.join(pr.workspace, rel); if (!fs.existsSync(fp)) throw new Error('Файл удалён');
+    spawn('explorer.exe', ['/select,', fp], { detached: true, stdio: 'ignore' }).unref();
     return { ok: true };
   },
   'POST /api/projects/:id/tasks': async (b, p) => {
@@ -2274,6 +2361,17 @@ const server = http.createServer(async (req, res) => {
     try { send(res, 200, await r[0](await body(req), r[1])); }
     catch (e) { send(res, 400, { error: e.message }); }
     return;
+  }
+  if (url.startsWith('/files/')) {
+    const m = url.match(/^\/files\/([a-f0-9]+)\/(.+)$/);
+    const pr = m && projectById(m[1]);
+    let rel = ''; try { rel = m ? decodeURIComponent(m[2]) : ''; } catch {}
+    if (!pr || !rel.startsWith('.agenthub/uploads/') || rel.includes('..')) { res.writeHead(404); return res.end('404'); }
+    const fp = path.join(pr.workspace, rel);
+    if (!fp.startsWith(path.join(pr.workspace, '.agenthub', 'uploads')) || !fs.existsSync(fp)) { res.writeHead(404); return res.end('404'); }
+    const ext = (fp.split('.').pop() || '').toLowerCase();
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'" });
+    return fs.createReadStream(fp).pipe(res);
   }
   if (url === '/' || url === '/index.html') {
     const html = sea ? sea.getAsset('index.html', 'utf8') : fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
